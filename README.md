@@ -28,8 +28,7 @@ Phase 1 implements a Docling-first ingestion flow and a Chroma indexing utility.
 
 - `pipeline.py` — ingest/convert documents with Docling and emit Phase 1 artifacts.
 - `index_chunks.py` — read `chunks.jsonl` and upsert chunks into a Chroma collection.
-- `retriever.py` — Chroma-backed retrieval with `search()` and RAG `ask()` methods.
-- `tasks.py`, `annotations/` — placeholders for later phases.
+- `retriever.py`, `tasks.py`, `annotations/` — placeholders for later phases.
 
 ## Quickstart
 
@@ -51,15 +50,4 @@ python index_chunks.py --artifacts-dir artifacts --chroma-dir chroma_db --collec
 
 - `document.json` should be treated as canonical for downstream processing.
 - `document.md` is intended for display/debugging only.
-- Later phases for tasks and annotations workflows are intentionally not implemented yet.
-
-
-### 3) Retrieve or ask (RAG)
-
-```python
-from retriever import DoclingRetriever
-
-r = DoclingRetriever(chroma_dir="chroma_db", collection_name="docling_chunks")
-results = r.search("What does the contract say about termination?", k=5)
-answer = r.ask("Summarize termination conditions")
-```
+- Later phases for retrieval, tasks, CLI, and annotations workflows are intentionally not implemented yet.
