@@ -1,9 +1,18 @@
-"""Docling-native retriever built on Chroma chunk indexes."""
+"""Docling-native retriever built on Chroma chunk indexes.
+
+Phase 4 adds retrieval quality hooks while preserving public API:
+- metadata filtering
+- hybrid search hooks (lexical + vector)
+- reranking hooks
+- table-aware behavior
+- multilingual embedding readiness
+"""
 
 from __future__ import annotations
 
 import json
 import os
+import re
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -51,10 +60,18 @@ class DoclingRetriever:
         chroma_dir: str = "chroma_db",
         collection_name: str = DEFAULT_COLLECTION,
         llm_model: str = DEFAULT_MODEL,
+        enable_hybrid: bool = False,
+        enable_rerank: bool = False,
+        prefer_tables_for_table_queries: bool = True,
+        multilingual_mode: bool = False,
     ) -> None:
         self.client = chromadb.PersistentClient(path=chroma_dir)
         self.collection = self.client.get_or_create_collection(name=collection_name)
         self.llm_model = llm_model
+        self.enable_hybrid = enable_hybrid
+        self.enable_rerank = enable_rerank
+        self.prefer_tables_for_table_queries = prefer_tables_for_table_queries
+        self.multilingual_mode = multilingual_mode
 
     def search(
         self,
@@ -62,15 +79,65 @@ class DoclingRetriever:
         k: int = 5,
         metadata_filter: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
-        """Top-k dense retrieval with metadata filter extension point."""
+        """Top-k retrieval with metadata filtering and quality-improvement hooks."""
         clean_query = query.strip()
         if not clean_query:
             return []
 
+        where = self._build_where_filter(metadata_filter)
+        base = self._vector_search(clean_query, k=max(k * 3, 10), where=where)
+
+        if self.enable_hybrid:
+            merged = self._hybrid_search(clean_query, base, k=max(k * 3, 10), where=where)
+        else:
+            merged = base
+
+        filtered = self._filter_results(merged, metadata_filter)
+
+        if self.enable_rerank:
+            reranked = self._rerank(clean_query, filtered)
+        else:
+            reranked = filtered
+
+        table_aware = self._apply_table_bias(clean_query, reranked)
+        return [record.to_dict() for record in table_aware[:k]]
+
+    def ask(
+        self,
+        query: str,
+        *,
+        k: int = 5,
+        metadata_filter: dict[str, Any] | None = None,
+        system_prompt: str | None = None,
+    ) -> dict[str, Any]:
+        """RAG helper: retrieve evidence, construct context, call LLM, return answer + sources."""
+        evidence = self.search(query=query, k=k, metadata_filter=metadata_filter)
+        context = self.build_context(evidence)
+
+        prompt = (
+            "Answer with clear, grounded statements from the provided context. "
+            "Add short source citations using [doc_id|chunk_id]. "
+            "If context is insufficient, explicitly say so.\n\n"
+            f"Question:\n{query}\n\nContext:\n{context}"
+        )
+        answer = self._call_llm(
+            prompt=prompt,
+            system_prompt=system_prompt
+            or "You are a research assistant that provides evidence-grounded answers.",
+        )
+
+        return {
+            "query": query,
+            "answer": answer,
+            "sources": evidence,
+            "evidence_summary": self._format_evidence_summary(evidence),
+        }
+
+    def _vector_search(self, query: str, *, k: int, where: dict[str, Any] | None) -> list[RetrievedChunk]:
         result = self.collection.query(
-            query_texts=[clean_query],
+            query_texts=[self._prepare_query_for_embedding(query)],
             n_results=k,
-            where=metadata_filter,
+            where=where,
             include=["documents", "metadatas", "distances"],
         )
 
@@ -96,38 +163,94 @@ class DoclingRetriever:
                     metadata=metadata,
                 )
             )
+        return records
 
-        # Future hook: hybrid search + reranking can be inserted here.
-        return [record.to_dict() for record in records]
-
-    def ask(
+    def _hybrid_search(
         self,
         query: str,
+        vector_results: list[RetrievedChunk],
         *,
-        k: int = 5,
-        metadata_filter: dict[str, Any] | None = None,
-        system_prompt: str | None = None,
-    ) -> dict[str, Any]:
-        """RAG helper: retrieve evidence, construct context, call LLM, return answer + sources."""
-        evidence = self.search(query=query, k=k, metadata_filter=metadata_filter)
-        context = self.build_context(evidence)
+        k: int,
+        where: dict[str, Any] | None,
+    ) -> list[RetrievedChunk]:
+        """Hybrid retrieval hook (lexical BM25-like + vector merge).
 
-        prompt = (
-            "Answer with clear, grounded statements from the provided context. "
-            "If context is insufficient, explicitly say so.\n\n"
-            f"Question:\n{query}\n\nContext:\n{context}"
-        )
-        answer = self._call_llm(
-            prompt=prompt,
-            system_prompt=system_prompt
-            or "You are a research assistant that cites available evidence snippets.",
-        )
+        Current implementation is a lightweight lexical scorer over candidates to keep
+        dependencies minimal. A full BM25 index can replace this method later.
+        """
+        _ = where
+        query_tokens = self._tokenize(query)
+        if not query_tokens:
+            return vector_results[:k]
 
-        return {
-            "query": query,
-            "answer": answer,
-            "sources": evidence,
-        }
+        scored: list[tuple[float, RetrievedChunk]] = []
+        for chunk in vector_results:
+            text_tokens = self._tokenize(chunk.text)
+            lexical = self._lexical_score(query_tokens, text_tokens)
+            vector = chunk.score or 0.0
+            hybrid_score = (0.65 * vector) + (0.35 * lexical)
+            scored.append((hybrid_score, chunk))
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        merged = [chunk for _, chunk in scored]
+        return merged[:k]
+
+    def _rerank(self, query: str, results: list[RetrievedChunk]) -> list[RetrievedChunk]:
+        """Reranker hook.
+
+        Current default reranker is heuristic and lightweight:
+        - boosts section title token overlap with query
+        - slight preference for shorter, denser snippets
+
+        Replace this method with a cross-encoder/model reranker in future phases.
+        """
+        query_tokens = set(self._tokenize(query))
+
+        def score(item: RetrievedChunk) -> float:
+            base = item.score or 0.0
+            title_tokens = set(self._tokenize(item.section_title or ""))
+            overlap = len(query_tokens & title_tokens)
+            length_penalty = min(len(item.text) / 2000.0, 0.2)
+            return base + (0.05 * overlap) - length_penalty
+
+        return sorted(results, key=score, reverse=True)
+
+    def _filter_results(
+        self,
+        results: list[RetrievedChunk],
+        metadata_filter: dict[str, Any] | None,
+    ) -> list[RetrievedChunk]:
+        """In-memory filter hook (kept even when Chroma where-filter is used)."""
+        if not metadata_filter:
+            return results
+
+        allowed_keys = {"doc_id", "chunk_type", "section_title", "source_path"}
+        active = {k: v for k, v in metadata_filter.items() if k in allowed_keys and v is not None}
+        if not active:
+            return results
+
+        filtered: list[RetrievedChunk] = []
+        for item in results:
+            ok = True
+            for key, value in active.items():
+                field_value = getattr(item, key)
+                if str(field_value) != str(value):
+                    ok = False
+                    break
+            if ok:
+                filtered.append(item)
+        return filtered
+
+    def _apply_table_bias(self, query: str, results: list[RetrievedChunk]) -> list[RetrievedChunk]:
+        """Table-aware ranking behavior for tabular intents."""
+        if not self.prefer_tables_for_table_queries:
+            return results
+
+        table_intent = any(term in query.lower() for term in ["table", "row", "column", "dataset", "csv"])
+        if not table_intent:
+            return results
+
+        return sorted(results, key=lambda r: (r.chunk_type == "table", r.score or 0.0), reverse=True)
 
     @staticmethod
     def build_context(chunks: list[dict[str, Any]]) -> str:
@@ -151,6 +274,24 @@ class DoclingRetriever:
         return "\n\n".join(lines)
 
     @staticmethod
+    def _format_evidence_summary(chunks: list[dict[str, Any]]) -> list[str]:
+        summary: list[str] = []
+        for chunk in chunks:
+            summary.append(
+                " | ".join(
+                    [
+                        f"doc_id={chunk.get('doc_id')}",
+                        f"chunk_id={chunk.get('chunk_id')}",
+                        f"type={chunk.get('chunk_type')}",
+                        f"section={chunk.get('section_title')}",
+                        f"pages={chunk.get('page_numbers')}",
+                        f"source={chunk.get('source_path')}",
+                    ]
+                )
+            )
+        return summary
+
+    @staticmethod
     def _normalize_page_numbers(raw: Any) -> list[int]:
         if isinstance(raw, list):
             return [p for p in raw if isinstance(p, int)]
@@ -162,6 +303,36 @@ class DoclingRetriever:
             except json.JSONDecodeError:
                 return []
         return []
+
+    @staticmethod
+    def _build_where_filter(metadata_filter: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not metadata_filter:
+            return None
+        allowed_keys = {"doc_id", "chunk_type", "section_title", "source_path"}
+        where = {k: v for k, v in metadata_filter.items() if k in allowed_keys and v is not None}
+        return where or None
+
+    def _prepare_query_for_embedding(self, query: str) -> str:
+        """Multilingual embedding readiness hook.
+
+        Currently passes text through unchanged. Future multilingual embedding
+        routing (language ID / model selection / translation) can live here.
+        """
+        _ = self.multilingual_mode
+        return query
+
+    @staticmethod
+    def _tokenize(text: str) -> list[str]:
+        return re.findall(r"[a-zA-Z0-9_]+", text.lower())
+
+    @staticmethod
+    def _lexical_score(query_tokens: list[str], text_tokens: list[str]) -> float:
+        if not text_tokens:
+            return 0.0
+        q = set(query_tokens)
+        t = set(text_tokens)
+        overlap = len(q & t)
+        return overlap / max(len(q), 1)
 
     def _call_llm(self, *, prompt: str, system_prompt: str) -> str:
         api_key = os.getenv("OPENAI_API_KEY")

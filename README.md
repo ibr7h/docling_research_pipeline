@@ -62,6 +62,26 @@ Menu:
 7. Extract references
 0. Exit
 
+
+## Retrieval improvements (Phase 4)
+
+`retriever.py` now includes retrieval-quality enhancements while preserving API compatibility:
+
+- Public API unchanged:
+  - `search(query, k=5, metadata_filter=None)`
+  - `ask(query, k=5, metadata_filter=None, ...)`
+- Metadata filtering support for:
+  - `doc_id`
+  - `chunk_type`
+  - `section_title`
+  - `source_path`
+- Hybrid-search hook (`_hybrid_search`) that combines vector scores with lexical BM25-like scoring.
+- Reranking hook (`_rerank`) for future cross-encoder or model rerankers.
+- Result filtering hook (`_filter_results`) for post-retrieval metadata constraints.
+- Table-aware behavior that boosts table chunks for table-oriented queries.
+- Multilingual embedding readiness hook (`_prepare_query_for_embedding`) for future language-aware routing/model selection.
+- Improved `ask()` evidence output includes `evidence_summary` for concise source tracing.
+
 ## tasks.py usage
 
 ```python
