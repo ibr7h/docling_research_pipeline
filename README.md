@@ -82,6 +82,49 @@ Menu:
 - Multilingual embedding readiness hook (`_prepare_query_for_embedding`) for future language-aware routing/model selection.
 - Improved `ask()` evidence output includes `evidence_summary` for concise source tracing.
 
+
+## Annotation layer (Phase 5)
+
+Annotation support is implemented under `annotations/` with a reusable data/storage model for scientific PDFs (no rendering UI yet):
+
+- `annotations/models.py`
+  - `Annotation` schema with:
+    - `annotation_id`
+    - `doc_id`
+    - `chunk_id` (optional)
+    - `source_path`
+    - `page_numbers`
+    - `selected_text`
+    - `note`
+    - `created_at`
+- `annotations/store.py`
+  - `AnnotationStore` for JSONL-backed persistence (`artifacts/annotations/annotations.jsonl`)
+  - add/create/list/find query helpers
+- `annotations/hooks.py`
+  - `attach_annotations_to_results(...)` to enrich retrieval evidence
+  - `annotation_context_for_prompt(...)` to build annotation-aware prompt context
+
+Example:
+
+```python
+from annotations import AnnotationStore, attach_annotations_to_results
+from retriever import DoclingRetriever
+
+store = AnnotationStore()
+store.create_and_add(
+    doc_id="paper-123",
+    chunk_id="chunk-abc",
+    source_path="/data/paper-123.pdf",
+    page_numbers=[4],
+    selected_text="Key finding sentence...",
+    note="Important for methods comparison",
+)
+
+retriever = DoclingRetriever()
+results = retriever.search("methods", k=5)
+results_with_annotations = attach_annotations_to_results(results, store)
+```
+
 ## tasks.py usage
 
 ```python
