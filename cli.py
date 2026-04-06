@@ -25,7 +25,7 @@ def _print_evidence(items: list[dict[str, Any]]) -> None:
         print(f"    text={snippet[:240]}{'...' if len(snippet) > 240 else ''}")
 
 
-def _index_documents() -> None:
+def _index_documents() -> tuple[str, str] | None:
     input_path = Path(input("Input file/dir: ").strip())
     artifacts_dir = Path(input("Artifacts dir [artifacts]: ").strip() or "artifacts")
     chroma_dir = Path(input("Chroma dir [chroma_db]: ").strip() or "chroma_db")
@@ -34,7 +34,7 @@ def _index_documents() -> None:
     docs = pipeline.find_documents(input_path)
     if not docs:
         print(f"No supported documents found at {input_path}")
-        return
+        return None
 
     converter = DocumentConverter()
     artifacts_dir.mkdir(parents=True, exist_ok=True)
@@ -44,6 +44,7 @@ def _index_documents() -> None:
 
     indexed = index_chunks.index_chunks(artifacts_dir, chroma_dir, collection)
     print(f"Indexed {indexed} chunks in collection '{collection}'")
+    return str(chroma_dir), collection
 
 
 def main() -> None:
@@ -68,7 +69,9 @@ def main() -> None:
             print("Goodbye.")
             break
         if choice == "1":
-            _index_documents()
+            updated = _index_documents()
+            if updated is not None:
+                chroma_dir, collection = updated
             retriever = DoclingRetriever(chroma_dir=chroma_dir, collection_name=collection)
             tasks = ResearchTasks(retriever)
         elif choice == "2":

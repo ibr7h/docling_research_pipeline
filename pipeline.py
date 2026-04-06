@@ -10,6 +10,7 @@ This module converts source documents with Docling and writes per-document artif
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import uuid
@@ -56,6 +57,13 @@ class ChunkRecord:
 def slugify(value: str) -> str:
     slug = re.sub(r"[^a-zA-Z0-9]+", "-", value.strip().lower()).strip("-")
     return slug or "document"
+
+
+def build_doc_id(source_file: Path) -> str:
+    """Create a stable, collision-resistant document id."""
+    base = slugify(source_file.stem)
+    digest = hashlib.sha1(str(source_file.resolve()).encode("utf-8")).hexdigest()[:8]
+    return f"{base}-{digest}"
 
 
 def find_documents(input_path: Path) -> list[Path]:
@@ -207,7 +215,7 @@ def process_document(source_file: Path, output_root: Path, converter: DocumentCo
     result = converter.convert(str(source_file))
     doc = getattr(result, "document", result)
 
-    doc_id = slugify(source_file.stem)
+    doc_id = build_doc_id(source_file)
     out_dir = output_root / doc_id
     out_dir.mkdir(parents=True, exist_ok=True)
 

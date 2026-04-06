@@ -156,4 +156,5 @@ Each task returns:
 
 - Retrieval/task behavior remains Docling-native through `document.json`-derived chunk artifacts.
 - `document.md` is display-only and should not be treated as canonical.
+- `doc_id` values are generated as stable slug+hash identifiers to avoid filename-collision overwrites.
 - Future work can plug in hybrid search, reranking, metadata filters, and annotation-aware retrieval without changing public task interfaces.

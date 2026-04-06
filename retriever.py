@@ -296,6 +296,13 @@ class DoclingRetriever:
         if isinstance(raw, list):
             return [p for p in raw if isinstance(p, int)]
         if isinstance(raw, str):
+            if "," in raw and "[" not in raw:
+                parts = [p.strip() for p in raw.split(",") if p.strip()]
+                nums: list[int] = []
+                for part in parts:
+                    if part.isdigit():
+                        nums.append(int(part))
+                return nums
             try:
                 parsed = json.loads(raw)
                 if isinstance(parsed, list):

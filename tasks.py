@@ -38,6 +38,12 @@ class ResearchTasks:
             k=8,
             metadata_filter=metadata_filter,
         )
+        if not rag.get("sources"):
+            rag = self.retriever.ask(
+                query=self._prompt_summarize(doc_id_or_query),
+                k=8,
+                metadata_filter=None,
+            )
         return TaskResult(
             task="summarize_document",
             query=query,

@@ -26,12 +26,19 @@ def load_chunks(chunks_file: Path) -> list[dict[str, Any]]:
 
 
 def build_metadata(chunk: dict[str, Any]) -> dict[str, Any]:
+    page_numbers = chunk.get("page_numbers", [])
+    if not isinstance(page_numbers, list):
+        page_numbers = []
+    page_numbers = [p for p in page_numbers if isinstance(p, int)]
+
     return {
         "doc_id": chunk.get("doc_id"),
         "chunk_id": chunk.get("chunk_id"),
         "chunk_type": chunk.get("chunk_type"),
         "section_title": chunk.get("section_title"),
-        "page_numbers": json.dumps(chunk.get("page_numbers", [])),
+        "page_numbers": ",".join(str(p) for p in page_numbers),
+        "page_start": min(page_numbers) if page_numbers else None,
+        "page_end": max(page_numbers) if page_numbers else None,
         "source_path": chunk.get("source_path"),
     }
 
